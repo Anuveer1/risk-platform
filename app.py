@@ -148,6 +148,26 @@ def lookup_ticker(ticker):
         'IBIT': ('iShares Bitcoin Trust', 'Crypto', 'ETF'),
         'GBTC': ('Grayscale Bitcoin Trust', 'Crypto', 'ETF'),
         'ETHE': ('Grayscale Ethereum Trust', 'Crypto', 'ETF'),
+        # Add these to the known_tickers dict:
+        'FBIOX': ('Fidelity Select Biotechnology', 'Healthcare', 'Fund'),
+        'FSELX': ('Fidelity Select Semiconductors', 'Technology', 'Fund'),
+        'BIIB': ('Biogen Inc', 'Healthcare', 'Stock'),
+        'COKE': ('Coca-Cola Consolidated', 'Consumer', 'Stock'),
+        'NUE': ('Nucor Corp', 'Industrials', 'Stock'),
+        'MCD': ("McDonald's Corp", 'Consumer', 'Stock'),
+        'VT': ('Vanguard Total World Stock ETF', 'Broad Market', 'ETF'),
+        'XOM': ('Exxon Mobil', 'Energy', 'Stock'),
+        'ABBV': ('AbbVie Inc', 'Healthcare', 'Stock'),
+        'AMD': ('Advanced Micro Devices', 'Technology', 'Stock'),
+        'HD': ('Home Depot', 'Consumer', 'Stock'),
+        'JPM': ('JPMorgan Chase', 'Financials', 'Stock'),
+        'JNJ': ('Johnson & Johnson', 'Healthcare', 'Stock'),
+        'MA': ('Mastercard Inc', 'Financials', 'Stock'),
+        'PEP': ('PepsiCo Inc', 'Consumer', 'Stock'),
+        'PG': ('Procter & Gamble', 'Consumer', 'Stock'),
+        'UNH': ('UnitedHealth Group', 'Healthcare', 'Stock'),
+        'VZ': ('Verizon Communications', 'Technology', 'Stock'),
+        'V': ('Visa Inc', 'Financials', 'Stock'),
     }
 
     if ticker in known_tickers:
@@ -296,137 +316,168 @@ def parse_pdf(file_bytes):
                 all_tables.extend(tables)
 
     lines = full_text.split('\n')
-    number_pattern = re.compile(r'-?[\d,]+\.\d{2,4}')
-    paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{0,5})\)')
 
     # ══════════════════════════════════════════════════════════════════════
-    #  STEP 1: Find every ticker and its line index
+    #  STRATEGY: Find ticker symbols in parentheses, then scan that line
+    #  and nearby lines for the number sequence:
+    #    beg_value, quantity, price, ending_value, cost_basis, gain/loss
+    #
+    #  Fidelity puts multi-line descriptions, so the ticker "(XLE)" might
+    #  appear on line N while the numbers are on line N, N+1, or N+2.
+    #  We also handle the case where numbers are on the SAME line as the
+    #  ticker.
     # ══════════════════════════════════════════════════════════════════════
-    ticker_lines = []
+
+    paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{1,5})\)')
+    number_pattern = re.compile(r'-?\$?[\d,]+\.\d{2,4}')
+
+    # Collect every (TICKER) occurrence with its line index
+    ticker_occurrences = []
     for i, line in enumerate(lines):
+        # Skip header/total/summary lines
+        low = line.strip().lower()
+        if low.startswith('total '):
+            continue
+        if 'beginning' in low and 'ending' in low:
+            continue
+        if 'market value' in low and 'quantity' in low:
+            continue
+        if 'account' in low and ('holdings' in low or 'summary' in low):
+            continue
+        if 'top holdings' in low:
+            continue
+        if 'income summary' in low:
+            continue
+        if 'percent of' in low:
+            continue
+
         for match in paren_pattern.finditer(line):
             ticker = match.group(1)
             if ticker in FALSE_POSITIVES:
                 continue
             if len(ticker) < 2 or len(ticker) > 5:
                 continue
-            if 'account' in line.lower() and 'holdings' in line.lower():
+            # Skip things like "(continued)" or "(ETFs)"
+            if ticker in {'ETFS', 'ETNS', 'NYSE', 'SIPC', 'SIPA', 'CUSIP',
+                          'FIFO', 'FDIC', 'USD', 'IAD', 'DTC', 'SIPC',
+                          'FBS', 'NFS', 'FDC', 'HSA', 'IRA', 'LLC',
+                          'ROTH', 'FMTC', 'AI'}:
                 continue
-            if line.strip().lower().startswith('total '):
-                continue
-            ticker_lines.append((i, ticker))
+            ticker_occurrences.append((i, ticker))
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  STEP 2: For each ticker, collect ALL numbers from its line and
-    #  the lines between it and the next ticker (its "block")
-    # ══════════════════════════════════════════════════════════════════════
-    for idx, (line_idx, ticker) in enumerate(ticker_lines):
-        # Block ends at next ticker line, or 6 lines out, whichever is first
-        if idx + 1 < len(ticker_lines):
-            block_end = ticker_lines[idx + 1][0]
+    # For each ticker occurrence, gather numbers from that line and the
+    # next few lines (up to the next ticker or 5 lines, whichever comes first)
+    for idx, (line_idx, ticker) in enumerate(ticker_occurrences):
+        # Determine the end of this ticker's "number block"
+        if idx + 1 < len(ticker_occurrences):
+            next_ticker_line = ticker_occurrences[idx + 1][0]
+            block_end = min(next_ticker_line, line_idx + 6)
         else:
-            block_end = min(len(lines), line_idx + 8)
+            block_end = min(len(lines), line_idx + 6)
 
-        # Collect all numbers from ticker line through end of block
+        # Collect all numbers from the ticker line through block_end
         block_nums = []
         for si in range(line_idx, block_end):
             line_text = lines[si]
-            # Skip header/total lines
-            if line_text.strip().lower().startswith('total '):
-                continue
-            if 'Beginning' in line_text and 'Ending' in line_text:
-                continue
-            if 'Market Value' in line_text and 'Quantity' in line_text:
-                continue
-            for n in number_pattern.findall(line_text):
+            low = line_text.strip().lower()
+            # Stop at total lines
+            if low.startswith('total '):
+                break
+            for n_match in number_pattern.finditer(line_text):
+                n_str = n_match.group().replace('$', '').replace(',', '').strip()
+                # Skip percentages that appear after the number block
+                # (EAI/EY values like "3.820%")
+                n_end = n_match.end()
+                rest = line_text[n_end:n_end + 1]
+                if rest == '%':
+                    continue
                 try:
-                    val = float(n.replace(',', ''))
+                    val = float(n_str)
                     block_nums.append(val)
                 except:
                     pass
 
-        # ══════════════════════════════════════════════════════════════════
-        #  STEP 3: Parse the number sequence
-        #  Fidelity format: beg_value, quantity, price, ending_value, cost_basis, gain/loss, ...
-        #  We need ending_value and cost_basis
-        # ══════════════════════════════════════════════════════════════════
-        if len(block_nums) < 5:
-            # Maybe it's a simpler format — just try to get value and cost
-            if len(block_nums) >= 2:
-                # Take the two largest positive numbers
-                positives = sorted([v for v in block_nums if v > 0.5], reverse=True)
-                if positives:
-                    ending_value = positives[0]
-                    cost_basis = positives[1] if len(positives) >= 2 else ending_value
+        # We need at least 4 numbers: beg_value, quantity, price, ending_value
+        # Ideally 6: beg, qty, price, ending, cost, gain/loss
+        if len(block_nums) < 4:
+            continue
+
+        # Try to identify the correct columns by finding qty * price ≈ ending
+        found = False
+        best_ending = None
+        best_cost = None
+
+        for start in range(min(3, len(block_nums) - 3)):
+            # Try: block_nums[start] = beg, [start+1] = qty, [start+2] = price,
+            #       [start+3] = ending, [start+4] = cost
+            qty = block_nums[start + 1]
+            price = block_nums[start + 2]
+            ending = block_nums[start + 3]
+
+            expected = qty * price
+            if expected > 0.01 and abs(ending - expected) / max(expected, 0.01) < 0.02:
+                best_ending = ending
+                if start + 4 < len(block_nums):
+                    best_cost = block_nums[start + 4]
                 else:
-                    continue
+                    best_cost = best_ending
+                found = True
+                break
+
+        # Also try without a beginning value: qty at [0], price at [1], ending at [2]
+        if not found:
+            for start in range(min(2, len(block_nums) - 2)):
+                qty = block_nums[start]
+                price = block_nums[start + 1]
+                ending = block_nums[start + 2]
+
+                expected = qty * price
+                if expected > 0.01 and abs(ending - expected) / max(expected, 0.01) < 0.02:
+                    best_ending = ending
+                    if start + 3 < len(block_nums):
+                        best_cost = block_nums[start + 3]
+                    else:
+                        best_cost = best_ending
+                    found = True
+                    break
+
+        if not found:
+            # Last resort: just take the largest positive numbers
+            positives = sorted([v for v in block_nums if v > 0.5], reverse=True)
+            if len(positives) >= 2:
+                best_ending = positives[0]
+                best_cost = positives[1]
+            elif len(positives) == 1:
+                best_ending = positives[0]
+                best_cost = positives[0]
             else:
                 continue
-        else:
-            # Standard Fidelity: beg, qty, price, ending, cost, gain, ...
-            # Validate by checking qty * price ≈ ending
-            beginning = block_nums[0]
-            quantity = block_nums[1]
-            price = block_nums[2]
-            ending_value = block_nums[3]
-            cost_basis = block_nums[4]
 
-            # Sanity check: does quantity * price ≈ ending_value?
-            expected = quantity * price
-            if expected > 0 and abs(ending_value - expected) / expected < 0.15:
-                # Good match — use these values
-                pass
-            else:
-                # Try shifting: maybe beg is missing or extra number at start
-                # Try nums[1]*nums[2] vs nums[3]
-                found = False
-                for start in range(0, min(3, len(block_nums) - 4)):
-                    q = block_nums[start + 1]
-                    p = block_nums[start + 2]
-                    e = block_nums[start + 3]
-                    c = block_nums[start + 4] if start + 4 < len(block_nums) else e
-                    exp = q * p
-                    if exp > 0 and abs(e - exp) / exp < 0.15:
-                        quantity = q
-                        price = p
-                        ending_value = e
-                        cost_basis = c
-                        found = True
-                        break
-                if not found:
-                    # Last resort: find any pair where n[i]*n[i+1] ≈ n[i+2]
-                    found2 = False
-                    for j in range(len(block_nums) - 2):
-                        exp = block_nums[j] * block_nums[j + 1]
-                        if exp > 0.5 and abs(block_nums[j + 2] - exp) / exp < 0.15:
-                            quantity = block_nums[j]
-                            price = block_nums[j + 1]
-                            ending_value = block_nums[j + 2]
-                            cost_basis = block_nums[j + 3] if j + 3 < len(block_nums) else ending_value
-                            found2 = True
-                            break
-                    if not found2:
-                        # Just take the largest numbers
-                        positives = sorted([v for v in block_nums if v > 0.5], reverse=True)
-                        if not positives:
-                            continue
-                        ending_value = positives[0]
-                        cost_basis = positives[1] if len(positives) >= 2 else ending_value
-
-        if ending_value < 0.50:
+        if best_ending is None or best_ending < 0.01:
             continue
-        if cost_basis <= 0:
-            cost_basis = ending_value
+
+        # Handle "not applicable" cost basis (for money market funds)
+        if best_cost is None or best_cost <= 0:
+            best_cost = best_ending
+
+        # Normalize ticker: BRKB -> BRK-B for Yahoo Finance
+        yahoo_ticker = ticker.replace('.', '-')
+        # Don't remap here — we'll store the original and remap at download time
 
         info = lookup_ticker(ticker)
         if info.get('valid'):
             if ticker in holdings:
-                holdings[ticker]['value'] = round(holdings[ticker]['value'] + ending_value, 2)
-                holdings[ticker]['cost'] = round(holdings[ticker]['cost'] + cost_basis, 2)
+                # Aggregate across accounts
+                holdings[ticker]['value'] = round(
+                    holdings[ticker]['value'] + best_ending, 2
+                )
+                holdings[ticker]['cost'] = round(
+                    holdings[ticker]['cost'] + best_cost, 2
+                )
             else:
                 holdings[ticker] = {
-                    'value': round(ending_value, 2),
-                    'cost': round(cost_basis, 2),
+                    'value': round(best_ending, 2),
+                    'cost': round(best_cost, 2),
                     'type': info['type'],
                     'name': info['name'],
                     'sector': info.get('sector', 'Other'),
@@ -439,62 +490,6 @@ def parse_pdf(file_bytes):
             holdings[ticker]['type'] = 'Cash'
             holdings[ticker]['sector'] = 'Cash'
             holdings[ticker]['cost'] = holdings[ticker]['value']
-
-    # ══════════════════════════════════════════════════════════════════════
-    #  FALLBACK: Generic approach if Strategy 1 found < 3 holdings
-    # ══════════════════════════════════════════════════════════════════════
-    if len(holdings) < 3:
-        candidates = {}
-        for table in all_tables:
-            for row in table:
-                if not row:
-                    continue
-                row_str = [str(cell).strip() if cell else '' for cell in row]
-                for cell in row_str:
-                    for word in cell.split():
-                        w = word.upper().strip('.,;:()').replace('.', '-')
-                        if is_likely_ticker(w) and w not in holdings:
-                            money = [parse_money(c) for c in row_str]
-                            money = [v for v in money if v is not None and abs(v) > 0.5]
-                            if money:
-                                if w not in candidates:
-                                    candidates[w] = []
-                                candidates[w].append(money)
-
-        for i, line in enumerate(lines):
-            for word in line.split():
-                w = word.upper().strip('.,;:()').replace('.', '-')
-                if is_likely_ticker(w) and w not in candidates and w not in holdings:
-                    context = ' '.join(lines[max(0, i):min(len(lines), i + 3)])
-                    amounts = re.findall(r'\$?\s*([\d,]+\.\d{2})', context)
-                    money = [parse_money(a) for a in amounts]
-                    money = [v for v in money if v and abs(v) > 0.5]
-                    if money:
-                        candidates[w] = [money]
-
-        progress_bar = st.progress(0, text="Validating tickers...")
-        total = len(candidates)
-        for cidx, (ticker, money_lists) in enumerate(candidates.items()):
-            progress_bar.progress((cidx + 1) / max(total, 1), text=f"Validating {ticker}...")
-            info = lookup_ticker(ticker)
-            if not info['valid']:
-                continue
-            all_money = []
-            for ml in money_lists:
-                all_money.extend(ml)
-            positives = sorted([v for v in all_money if v > 0], reverse=True)
-            if not positives:
-                continue
-            value = positives[0]
-            cost = positives[1] if len(positives) >= 2 and positives[1] > 1 else value
-            holdings[ticker] = {
-                'value': round(value, 2),
-                'cost': round(cost, 2),
-                'type': info['type'],
-                'name': info['name'],
-                'sector': info.get('sector', 'Other'),
-            }
-        progress_bar.empty()
 
     return holdings, full_text, all_tables
     
