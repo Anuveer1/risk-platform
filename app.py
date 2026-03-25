@@ -54,6 +54,8 @@ def lookup_ticker(ticker):
     # Hard-coded sector/type map for common tickers (avoids slow API calls)
     known_tickers = {
         'AAPL': ('Apple Inc', 'Technology', 'Stock'),
+        'V': ('Visa Inc', 'Financials', 'Stock'),
+        'COST': ('Costco Wholesale', 'Consumer', 'Stock'),
         'GOOGL': ('Alphabet Inc', 'Technology', 'Stock'),
         'GOOG': ('Alphabet Inc', 'Technology', 'Stock'),
         'AMZN': ('Amazon.com Inc', 'Technology', 'Stock'),
@@ -317,141 +319,161 @@ def parse_pdf(file_bytes):
 
     lines = full_text.split('\n')
 
-    paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{1,5})\)')
+    paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{0,5})\)')
     number_pattern = re.compile(r'-?\$?[\d,]+\.\d{2,4}')
-    percent_pattern = re.compile(r'-?\$?[\d,]+\.\d{2,4}%')
 
-    # Non-ticker abbreviations to skip
+    # Non-ticker abbreviations found in Fidelity PDFs
     SKIP_PARENS = {
         'ETFS', 'ETNS', 'NYSE', 'SIPC', 'SIPA', 'CUSIP', 'FIFO', 'FDIC',
         'USD', 'IAD', 'DTC', 'FBS', 'NFS', 'FDC', 'HSA', 'IRA', 'LLC',
-        'ROTH', 'FMTC', 'AI', 'FMR', 'SIPC', 'ETF', 'CD', 'CDS', 'CUSC',
-        'CUSCS', 'MLPs', 'MLP', 'REITs', 'REIT', 'UITs', 'UIT', 'LPs',
+        'ROTH', 'FMTC', 'AI', 'FMR', 'ETF', 'CD', 'CDS', 'CUSC', 'CUSCS',
+        'MLP', 'MLPS', 'REIT', 'REITS', 'UIT', 'UITS', 'LP', 'LPS',
+        'S', 'OR', 'AND', 'THE', 'FOR', 'IN', 'OF', 'TO', 'AT', 'BY',
+        'AN', 'IS', 'IT', 'IF', 'ON', 'AS', 'BE', 'DO', 'SO', 'UP',
+        'FDC', 'FAST', 'II', 'III', 'IV', 'VI', 'VII', 'VIII', 'IX', 'XI',
     }
 
-    # ── Pass 1: Find all ticker occurrences with line indices ──
-    ticker_occurrences = []
-    for i, line in enumerate(lines):
-        low = line.strip().lower()
-        # Skip obvious non-holding lines
-        if low.startswith('total '):
-            continue
-        if 'top holdings' in low:
-            continue
-        if 'income summary' in low:
-            continue
-        if 'estimated cash flow' in low:
-            continue
-        if 'activity' in low and 'core' not in low:
-            continue
-        if 'settlement' in low:
-            continue
-        if 'dividend received' in low:
-            continue
-        if 'you bought' in low:
-            continue
-        if 'copyright' in low or 'moody' in low:
-            continue
+    # ── Step 1: Identify all ticker lines, including the data-line offset ──
+    # Fidelity format puts numbers on the FIRST line of description,
+    # but the ticker (in parens) may be on that same line or up to 3 lines later.
 
-        for match in paren_pattern.finditer(line):
-            ticker = match.group(1)
-            if ticker in SKIP_PARENS:
-                continue
-            if ticker in FALSE_POSITIVES:
-                continue
-            if len(ticker) < 1 or len(ticker) > 5:
-                continue
-            ticker_occurrences.append((i, ticker))
-
-    # ── Pass 2: For each ticker, look BACKWARDS for numbers ──
-    def extract_numbers_from_line(line_text):
-        """Extract dollar/number values, excluding percentages."""
+    def extract_nums(line_text):
         nums = []
         for m in number_pattern.finditer(line_text):
-            # Check if it's actually a percentage
             end_pos = m.end()
             if end_pos < len(line_text) and line_text[end_pos] == '%':
                 continue
             n_str = m.group().replace('$', '').replace(',', '').strip()
             try:
-                val = float(n_str)
-                nums.append(val)
+                nums.append(float(n_str))
             except:
                 pass
         return nums
 
-    for idx, (line_idx, ticker) in enumerate(ticker_occurrences):
-        # Look at the ticker line and up to 4 lines BEFORE it for numbers
-        # Also check 1-2 lines AFTER (for cases where numbers are on same line)
-        block_nums = []
+    def is_skip_line(line_text):
+        low = line_text.strip().lower()
+        skip_phrases = [
+            'total ', 'top holdings', 'income summary', 'estimated cash flow',
+            'dividend received', 'you bought', 'reinvestment', 'copyright',
+            'moody', 'settlement', 'beginning', 'market value', 'description',
+            'feb 1', 'feb 28', 'account #', 'account summary', 'account value',
+            'account holdings', 'percent of', 'page ', 'envelope',
+            'portfolio summary', 'portfolio value', 'portfolio change',
+            'ending portfolio', 'beginning portfolio', 'additions', 'subtractions',
+            'deposits', 'withdrawals', 'change in', 'accrued interest',
+            'ending account', 'beginning account', 'contact information',
+            'online fidelity', 'customer service', 'brokerage services',
+            'save on your', 'fidelity.com', 'investment report',
+            'all positions held', 'estimated annual', 'includes exchange',
+            'core fund activity', 'anuveer', 'general investments',
+            'personal retirement', 'fidelity account', 'fidelity roth',
+            'common stock', 'equity etps', 'other etps', 'stock funds',
+            'short-term funds', 'important:', 'asset allocation', 'asset class',
+            'domestic stock', 'short term', 'foreign stock', 'other',
+            'please note', 'additional information', 'fractional share',
+            'payment for order', 'executing orders', 'sales loads',
+            'statement discrepancies', 'material changes', 'mutual funds and',
+            'information about', 'lost or stolen', 'additional investments',
+            'free credit', 'miscellaneous', 'price information',
+        ]
+        for phrase in skip_phrases:
+            if low.startswith(phrase) or (phrase in low and len(low) < 100 and not any(c.isdigit() for c in low[:20])):
+                # But don't skip if the line has a ticker AND numbers
+                if '(' in line_text and any(c.isdigit() for c in line_text):
+                    has_ticker = False
+                    for pm in paren_pattern.finditer(line_text):
+                        t = pm.group(1)
+                        if t not in SKIP_PARENS and len(t) >= 1:
+                            has_ticker = True
+                    if has_ticker:
+                        return False
+                return True
+        return False
 
-        # Search backwards first (up to 4 lines before ticker)
-        search_start = max(0, line_idx - 4)
-        search_end = min(len(lines), line_idx + 3)
+    # ── Step 2: Find all tickers and associate with their data numbers ──
+    # Build a list of (ticker, data_numbers) pairs
 
-        # But don't go past another ticker's line
-        prev_ticker_line = -1
-        if idx > 0:
-            prev_ticker_line = ticker_occurrences[idx - 1][0]
-
-        # Also don't go past "Total" lines
-        candidate_lines = []
-        for si in range(search_start, search_end):
-            if si <= prev_ticker_line and si < line_idx:
+    # First, find every line that has a (TICKER)
+    ticker_lines = []
+    for i, line in enumerate(lines):
+        if is_skip_line(line):
+            continue
+        for match in paren_pattern.finditer(line):
+            ticker = match.group(1)
+            if ticker in SKIP_PARENS:
                 continue
-            line_text = lines[si].strip()
-            low = line_text.lower()
-            if low.startswith('total '):
-                if si < line_idx:
-                    # Reset — don't use numbers from before a Total line
-                    candidate_lines = []
-                    continue
-                else:
+            if len(ticker) < 1 or len(ticker) > 5:
+                continue
+            ticker_lines.append((i, ticker))
+
+    # For each ticker, find its numbers by searching backwards
+    for t_idx, (line_idx, ticker) in enumerate(ticker_lines):
+        # Get numbers on the ticker's own line
+        own_nums = extract_nums(lines[line_idx])
+
+        # If this line has 4+ numbers, the data is on the same line
+        if len(own_nums) >= 4:
+            block_nums = own_nums
+        else:
+            # Search backwards up to 4 lines for a line with 4+ numbers
+            block_nums = []
+            prev_ticker_line = ticker_lines[t_idx - 1][0] if t_idx > 0 else -1
+
+            for si in range(line_idx - 1, max(prev_ticker_line, line_idx - 5), -1):
+                if si < 0:
                     break
-            candidate_lines.append((si, line_text))
+                candidate = lines[si].strip()
+                low_c = candidate.lower()
+                if low_c.startswith('total '):
+                    break
+                nums = extract_nums(candidate)
+                if len(nums) >= 4:
+                    block_nums = nums
+                    break
 
-        # Now find which candidate line has the main number block
-        # The "data line" typically has 5+ numbers on it
-        data_line_nums = []
-        for si, line_text in candidate_lines:
-            nums = extract_numbers_from_line(line_text)
-            if len(nums) >= 4:
-                # This is likely the main data line
-                data_line_nums = nums
-                break
-
-        # If we didn't find a line with 4+ numbers, gather all numbers
-        if not data_line_nums:
-            for si, line_text in candidate_lines:
-                data_line_nums.extend(extract_numbers_from_line(line_text))
-
-        block_nums = data_line_nums
+            # If still nothing, combine ticker line nums with lines above
+            if not block_nums:
+                combined = []
+                for si in range(max(0, max(prev_ticker_line + 1, line_idx - 3)), line_idx + 1):
+                    candidate = lines[si].strip()
+                    if candidate.lower().startswith('total '):
+                        combined = []
+                        continue
+                    combined.extend(extract_nums(candidate))
+                block_nums = combined
 
         if len(block_nums) < 3:
             continue
 
-        # ── Identify columns: beg_value, quantity, price, ending_value, cost, gain_loss ──
-        found = False
+        # ── Identify: beg_value, quantity, price, ending_value, cost_basis ──
         best_ending = None
         best_cost = None
+        found = False
 
-        # Try qty * price ≈ ending for various starting offsets
-        for start in range(min(4, len(block_nums) - 2)):
-            for qi in range(start, min(len(block_nums) - 2, start + 3)):
+        # Try all plausible (qty_index, price_index) combos
+        for qi in range(min(4, len(block_nums) - 1)):
+            for pi in range(qi + 1, min(qi + 3, len(block_nums))):
                 qty = block_nums[qi]
-                price = block_nums[qi + 1]
+                price = block_nums[pi]
                 expected = qty * price
 
-                if expected < 0.01:
+                if expected < 0.50:
                     continue
 
-                # Look for ending value that matches
-                for ei in range(qi + 2, min(len(block_nums), qi + 4)):
+                # Look for ending value after price
+                for ei in range(pi + 1, min(pi + 3, len(block_nums))):
                     ending = block_nums[ei]
-                    if abs(ending - expected) / max(expected, 0.01) < 0.015:
+                    tolerance = 0.02 if expected > 10 else 0.05
+                    if abs(ending - expected) / max(expected, 0.01) < tolerance:
                         best_ending = ending
+                        # Cost is typically the next number after ending
                         if ei + 1 < len(block_nums):
-                            best_cost = abs(block_nums[ei + 1])
+                            cost_val = abs(block_nums[ei + 1])
+                            # Sanity: cost should be somewhat close to ending value
+                            if cost_val < best_ending * 5 and cost_val > 0.5:
+                                best_cost = cost_val
+                            else:
+                                best_cost = best_ending
                         else:
                             best_cost = best_ending
                         found = True
@@ -461,47 +483,42 @@ def parse_pdf(file_bytes):
             if found:
                 break
 
+        # Special case: money market funds where price = $1.0000
         if not found:
-            # Fallback: for money market (SPAXX, FDRXX), qty=value and price=1.0000
-            if len(block_nums) >= 3:
-                for qi in range(len(block_nums) - 2):
-                    qty = block_nums[qi]
-                    price = block_nums[qi + 1]
-                    if abs(price - 1.0) < 0.001 and qty > 1:
-                        best_ending = qty  # qty IS the value for $1.00 funds
-                        best_cost = best_ending
-                        found = True
-                        break
+            for qi in range(len(block_nums) - 1):
+                qty = block_nums[qi]
+                price = block_nums[qi + 1]
+                if abs(price - 1.0) < 0.001 and qty > 1:
+                    best_ending = qty
+                    best_cost = qty
+                    found = True
+                    break
 
-        if not found:
-            continue
-
-        if best_ending is None or best_ending < 0.01:
+        if not found or best_ending is None or best_ending < 0.01:
             continue
 
         if best_cost is None or best_cost <= 0:
             best_cost = best_ending
 
-        # ── Validate ticker and aggregate ──
+        # ── Validate ticker via lookup ──
         info = lookup_ticker(ticker)
-        if info.get('valid'):
-            if ticker in holdings:
-                holdings[ticker]['value'] = round(
-                    holdings[ticker]['value'] + best_ending, 2
-                )
-                holdings[ticker]['cost'] = round(
-                    holdings[ticker]['cost'] + best_cost, 2
-                )
-            else:
-                holdings[ticker] = {
-                    'value': round(best_ending, 2),
-                    'cost': round(best_cost, 2),
-                    'type': info['type'],
-                    'name': info['name'],
-                    'sector': info.get('sector', 'Other'),
-                }
+        if not info.get('valid'):
+            continue
 
-    # Mark cash positions
+        # ── Aggregate across accounts ──
+        if ticker in holdings:
+            holdings[ticker]['value'] = round(holdings[ticker]['value'] + best_ending, 2)
+            holdings[ticker]['cost'] = round(holdings[ticker]['cost'] + best_cost, 2)
+        else:
+            holdings[ticker] = {
+                'value': round(best_ending, 2),
+                'cost': round(best_cost, 2),
+                'type': info['type'],
+                'name': info['name'],
+                'sector': info.get('sector', 'Other'),
+            }
+
+    # ── Mark cash positions ──
     cash_tickers = {'SPAXX', 'FDRXX', 'SWVXX', 'VMFXX', 'FCASH', 'SPRXX'}
     for ticker in list(holdings.keys()):
         if ticker in cash_tickers:
