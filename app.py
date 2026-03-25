@@ -780,7 +780,7 @@ elif st.session_state.dashboards_ready:
     # ── Download prices ──────────────────────────────────────────────────────
     stock_tickers = [
         t for t, h in holdings.items()
-        if h.get('type') not in ('Cash',)
+        if h.get('type') not in ('Cash',) and t not in {'SPAXX', 'FDRXX', 'SWVXX', 'VMFXX', 'FCASH', 'SPRXX'}
     ]
 
     # Fix known ticker symbol mismatches
