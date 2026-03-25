@@ -12,6 +12,9 @@ import pandas as pd
 import numpy as np
 import re
 import io
+import plotly.express as px
+from datetime import datetime, timedelta
+
 
 st.set_page_config(
     page_title="Portfolio Risk Dashboard",
@@ -687,6 +690,279 @@ def calculate_metrics(holdings, close, valid_tickers, total_value):
     m['ind_sharpe'] = pd.Series(ind_sharpe)
 
     return m
+
+def render_risk_reward_scatter(holdings):
+    """Render a Risk vs Reward scatter plot comparing portfolio against major indices."""
+    st.markdown("---")
+    st.subheader("📊 Risk vs. Reward Analysis")
+    st.caption("Compares your portfolio's risk-adjusted performance against major benchmarks (1-year data)")
+
+    total_value = sum(h['value'] for h in holdings.values())
+    if total_value <= 0:
+        st.warning("No holdings to analyze.")
+        return
+
+    weights = {}
+    for ticker, info in holdings.items():
+        if info.get('type') == 'Cash':
+            continue
+        weights[ticker] = info['value'] / total_value
+
+    benchmarks = {
+        '^GSPC': 'S&P 500',
+        '^IXIC': 'NASDAQ Composite',
+        '^DJI': 'Dow Jones',
+        '^RUT': 'Russell 2000',
+        'VT': 'Total World (VT)',
+        'AGG': 'US Agg Bond (AGG)',
+        'QQQ': 'NASDAQ 100 (QQQ)',
+        'VWO': 'Emerging Markets (VWO)',
+        'GLD': 'Gold (GLD)',
+        'VNQ': 'Real Estate (VNQ)',
+        'TLT': '20+ Year Treasury (TLT)',
+        'BTC-USD': 'Bitcoin',
+    }
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def get_scatter_returns(tickers_list, start, end):
+        try:
+            data = yf.download(
+                tickers_list,
+                start=start,
+                end=end,
+                progress=False,
+                auto_adjust=True,
+            )
+            if isinstance(data.columns, pd.MultiIndex):
+                if 'Close' in data.columns.get_level_values(0):
+                    closes = data['Close']
+                else:
+                    closes = data.droplevel(0, axis=1)
+            else:
+                if len(tickers_list) == 1:
+                    closes = data[['Close']]
+                    closes.columns = [tickers_list[0]]
+                else:
+                    closes = data
+            returns = closes.pct_change().dropna()
+            return returns
+        except Exception as e:
+            st.warning(f"Error downloading data: {e}")
+            return pd.DataFrame()
+
+    ticker_remap = {'BRKB': 'BRK-B', 'BRK.B': 'BRK-B'}
+    portfolio_tickers = []
+    ticker_weight_map = {}
+    for ticker, w in weights.items():
+        yahoo_ticker = ticker_remap.get(ticker, ticker)
+        portfolio_tickers.append(yahoo_ticker)
+        ticker_weight_map[yahoo_ticker] = w
+
+    benchmark_tickers = list(benchmarks.keys())
+    all_tickers = list(set(portfolio_tickers + benchmark_tickers))
+
+    with st.spinner("Downloading market data for risk analysis..."):
+        returns_df = get_scatter_returns(all_tickers, start_date, end_date)
+
+    if returns_df.empty:
+        st.warning("Could not download market data for risk analysis.")
+        return
+
+    returns_df.columns = [str(c).strip() for c in returns_df.columns]
+
+    portfolio_daily_returns = pd.Series(0.0, index=returns_df.index)
+    total_matched_weight = 0
+
+    for yahoo_ticker, w in ticker_weight_map.items():
+        if yahoo_ticker in returns_df.columns:
+            portfolio_daily_returns += returns_df[yahoo_ticker].fillna(0) * w
+            total_matched_weight += w
+
+    if total_matched_weight > 0 and total_matched_weight < 0.99:
+        portfolio_daily_returns = portfolio_daily_returns / total_matched_weight
+
+    trading_days = 252
+
+    def calc_metrics_scatter(daily_returns_series):
+        if daily_returns_series.empty or daily_returns_series.std() == 0:
+            return None, None
+        ann_return = daily_returns_series.mean() * trading_days * 100
+        ann_vol = daily_returns_series.std() * (trading_days ** 0.5) * 100
+        return round(ann_return, 2), round(ann_vol, 2)
+
+    scatter_data = []
+
+    p_ret, p_vol = calc_metrics_scatter(portfolio_daily_returns)
+    if p_ret is not None:
+        scatter_data.append({
+            'Name': '⭐ Your Portfolio',
+            'Annualized Return (%)': p_ret,
+            'Annualized Volatility (%)': p_vol,
+            'Sharpe Ratio': round(p_ret / p_vol, 2) if p_vol > 0 else 0,
+            'Category': 'Your Portfolio',
+        })
+
+    for bench_ticker, bench_name in benchmarks.items():
+        col_name = str(bench_ticker).strip()
+        if col_name in returns_df.columns:
+            b_ret, b_vol = calc_metrics_scatter(returns_df[col_name].dropna())
+            if b_ret is not None:
+                category = 'Equity Index'
+                if bench_ticker in ('AGG', 'TLT'):
+                    category = 'Fixed Income'
+                elif bench_ticker == 'GLD':
+                    category = 'Commodity'
+                elif bench_ticker == 'VNQ':
+                    category = 'Real Estate'
+                elif bench_ticker == 'BTC-USD':
+                    category = 'Crypto'
+                elif bench_ticker in ('VWO', 'VT'):
+                    category = 'International'
+
+                scatter_data.append({
+                    'Name': bench_name,
+                    'Annualized Return (%)': b_ret,
+                    'Annualized Volatility (%)': b_vol,
+                    'Sharpe Ratio': round(b_ret / b_vol, 2) if b_vol > 0 else 0,
+                    'Category': category,
+                })
+
+    if not scatter_data:
+        st.warning("Could not compute risk/reward metrics.")
+        return
+
+    scatter_df = pd.DataFrame(scatter_data)
+
+    color_map = {
+        'Your Portfolio': '#FF4B4B',
+        'Equity Index': '#636EFA',
+        'Fixed Income': '#00CC96',
+        'Commodity': '#FFA500',
+        'Real Estate': '#AB63FA',
+        'Crypto': '#EF553B',
+        'International': '#19D3F3',
+    }
+
+    fig = px.scatter(
+        scatter_df,
+        x='Annualized Volatility (%)',
+        y='Annualized Return (%)',
+        color='Category',
+        color_discrete_map=color_map,
+        hover_name='Name',
+        hover_data={
+            'Annualized Return (%)': ':.2f',
+            'Annualized Volatility (%)': ':.2f',
+            'Sharpe Ratio': ':.2f',
+            'Category': False,
+        },
+    )
+
+    for trace in fig.data:
+        if trace.name == 'Your Portfolio':
+            trace.marker.size = 20
+            trace.marker.symbol = 'star'
+            trace.marker.line = dict(width=2, color='white')
+        else:
+            trace.marker.size = 12
+            trace.marker.line = dict(width=1, color='white')
+
+    for _, row in scatter_df.iterrows():
+        fig.add_annotation(
+            x=row['Annualized Volatility (%)'],
+            y=row['Annualized Return (%)'],
+            text=row['Name'],
+            showarrow=False,
+            yshift=15,
+            font=dict(size=10),
+        )
+
+    sp500_row = scatter_df[scatter_df['Name'] == 'S&P 500']
+    if not sp500_row.empty:
+        sp_ret = sp500_row.iloc[0]['Annualized Return (%)']
+        sp_vol = sp500_row.iloc[0]['Annualized Volatility (%)']
+
+        fig.add_hline(
+            y=sp_ret, line_dash="dot", line_color="gray", opacity=0.5,
+            annotation_text="S&P 500 Return", annotation_position="top left",
+        )
+        fig.add_vline(
+            x=sp_vol, line_dash="dot", line_color="gray", opacity=0.5,
+            annotation_text="S&P 500 Risk", annotation_position="top right",
+        )
+
+        x_range = scatter_df['Annualized Volatility (%)']
+        y_range = scatter_df['Annualized Return (%)']
+        x_min, x_max = x_range.min() - 3, x_range.max() + 3
+        y_min, y_max = y_range.min() - 3, y_range.max() + 3
+
+        quadrant_labels = [
+            ((sp_vol + x_min) / 2, (sp_ret + y_max) / 2, "✅ Lower Risk\nHigher Return", "green"),
+            ((sp_vol + x_max) / 2, (sp_ret + y_max) / 2, "⚠️ Higher Risk\nHigher Return", "orange"),
+            ((sp_vol + x_min) / 2, (sp_ret + y_min) / 2, "⚠️ Lower Risk\nLower Return", "orange"),
+            ((sp_vol + x_max) / 2, (sp_ret + y_min) / 2, "❌ Higher Risk\nLower Return", "red"),
+        ]
+
+        for qx, qy, label, color in quadrant_labels:
+            fig.add_annotation(
+                x=qx, y=qy, text=label, showarrow=False,
+                font=dict(size=11, color=color), opacity=0.4,
+            )
+
+    fig.update_layout(
+        title="Risk vs. Reward: Your Portfolio vs. Major Benchmarks",
+        xaxis_title="Annualized Volatility (Risk) %",
+        yaxis_title="Annualized Return %",
+        height=600,
+        template="plotly_white",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5,
+        ),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("📋 Comparison Metrics")
+
+    display_df = scatter_df[['Name', 'Annualized Return (%)', 'Annualized Volatility (%)', 'Sharpe Ratio']].copy()
+    display_df = display_df.sort_values('Sharpe Ratio', ascending=False).reset_index(drop=True)
+
+    def highlight_portfolio(row):
+        if '⭐' in str(row['Name']):
+            return ['background-color: #fff3cd; font-weight: bold'] * len(row)
+        return [''] * len(row)
+
+    styled = display_df.style.apply(highlight_portfolio, axis=1).format({
+        'Annualized Return (%)': '{:.2f}%',
+        'Annualized Volatility (%)': '{:.2f}%',
+        'Sharpe Ratio': '{:.2f}',
+    })
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    if p_ret is not None and not sp500_row.empty:
+        sp_ret = sp500_row.iloc[0]['Annualized Return (%)']
+        sp_vol = sp500_row.iloc[0]['Annualized Volatility (%)']
+        p_sharpe = p_ret / p_vol if p_vol > 0 else 0
+        sp_sharpe = sp_ret / sp_vol if sp_vol > 0 else 0
+
+        if p_ret > sp_ret and p_vol < sp_vol:
+            verdict = "🟢 **Excellent** — Your portfolio has higher returns with lower risk than the S&P 500."
+        elif p_ret > sp_ret and p_vol >= sp_vol:
+            verdict = "🟡 **Good returns, but riskier** — You're outperforming the S&P 500 but taking on more volatility."
+        elif p_ret <= sp_ret and p_vol < sp_vol:
+            verdict = "🟡 **Conservative** — Lower risk than the S&P 500, but also lower returns."
+        else:
+            verdict = "🔴 **Underperforming** — Lower returns with higher risk than the S&P 500. Consider rebalancing."
+
+        st.markdown(f"**Portfolio Assessment:** {verdict}")
+        st.markdown(
+            f"Your Sharpe Ratio ({p_sharpe:.2f}) vs S&P 500 ({sp_sharpe:.2f}) — "
+            f"{'higher is better, and yours is ahead!' if p_sharpe > sp_sharpe else 'the S&P 500 currently has better risk-adjusted returns.'}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1494,6 +1770,12 @@ elif st.session_state.dashboards_ready:
         styled_gl = gl_table.style.apply(color_gl, axis=1)
         st.dataframe(styled_gl, use_container_width=True, hide_index=True)
 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  RISK vs REWARD SCATTER (outside tabs, below all tab content)
+    # ══════════════════════════════════════════════════════════════════════════
+    render_risk_reward_scatter(holdings)
+
+    
     # ══════════════════════════════════════════════════════════════════════════
     #  FOOTER
     # ══════════════════════════════════════════════════════════════════════════
