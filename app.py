@@ -163,7 +163,8 @@ def is_likely_ticker(word):
 
 
 def parse_pdf(file_bytes):
-    """Parse Fidelity PDF statement and extract holdings."""
+    """Parse brokerage PDF statement and extract holdings.
+    Optimized for Fidelity, with fallback for other brokerages."""
     holdings = {}
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -178,11 +179,16 @@ def parse_pdf(file_bytes):
                 all_tables.extend(tables)
 
     lines = full_text.split('\n')
-
-    # ── Step 1: Find all (TICKER) positions ──────────────────────────────
+    number_pattern = re.compile(r'-?[\d,]+\.\d{2,4}')
     paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{0,5})\)')
-    ticker_locations = []  # (line_index, ticker)
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  STRATEGY 1: Fidelity-style — tickers in parentheses
+    #  Format: COMPANY NAME (TICKER)  beg_val qty price end_val cost g/l eai
+    #  Ticker can be on same line as numbers or 1-3 lines after
+    # ══════════════════════════════════════════════════════════════════════
+
+    ticker_locations = []
     for i, line in enumerate(lines):
         for match in paren_pattern.finditer(line):
             ticker = match.group(1)
@@ -190,67 +196,27 @@ def parse_pdf(file_bytes):
                 continue
             if len(ticker) < 2 or len(ticker) > 5:
                 continue
-            # Skip lines that are clearly headers or footnotes
             if 'account' in line.lower() and 'holdings' in line.lower():
                 continue
-            if 'total' in line.lower() and ticker not in line:
+            if line.strip().lower().startswith('total '):
                 continue
             ticker_locations.append((i, ticker))
 
-    # ── Step 2: For each ticker, find its data row ───────────────────────
-    # Fidelity columns: Beginning Value, Quantity, Price, Ending Value,
-    #                   Cost Basis, Gain/Loss, EAI
-    # Numbers might be on the same line as (TICKER) or on preceding lines
-
-    number_pattern = re.compile(r'-?[\d,]+\.\d{2,4}')
-
     for line_idx, ticker in ticker_locations:
-        # Search the ticker line and up to 4 lines BEFORE it
-        # (because for SPDR ETFs, numbers come before the ticker)
-        # Also check 1 line after (for continuation numbers)
         search_start = max(0, line_idx - 4)
         search_end = min(len(lines), line_idx + 2)
 
-        # Collect all numbers from the search window
-        all_nums = []
+        best_line_idx = None
+        best_line_count = 0
         for si in range(search_start, search_end):
             line_text = lines[si]
-            # Skip header lines
+            if line_text.strip().lower().startswith('total '):
+                continue
             if 'Beginning' in line_text and 'Ending' in line_text:
                 continue
             if 'Market Value' in line_text and 'Quantity' in line_text:
                 continue
             if 'Description' in line_text and 'Cost Basis' in line_text:
-                continue
-            if line_text.strip().startswith('Total '):
-                continue
-
-            nums_in_line = number_pattern.findall(line_text)
-            for n in nums_in_line:
-                try:
-                    val = float(n.replace(',', ''))
-                    all_nums.append(val)
-                except:
-                    pass
-
-        # Filter out percentages (small numbers that are yields like 0.460, 3.820)
-        # and very small numbers that are likely yields or percentages
-        # Keep numbers > 1.0 as potential values, but also keep quantity/price
-        # We need at least: beginning, quantity, price, ending, cost
-        # Minimum 5 numbers to identify the pattern
-
-        # Separate into "data numbers" — filter out obvious yields/percentages
-        # Yields in Fidelity are on their own line like "0.460%" or "3.820%"
-        # We want the main row numbers
-
-        # Find the line with the most numbers — that's likely the data row
-        best_line_idx = None
-        best_line_count = 0
-        for si in range(search_start, search_end):
-            line_text = lines[si]
-            if line_text.strip().startswith('Total '):
-                continue
-            if 'Beginning' in line_text and 'Ending' in line_text:
                 continue
             count = len(number_pattern.findall(line_text))
             if count > best_line_count:
@@ -260,7 +226,6 @@ def parse_pdf(file_bytes):
         if best_line_idx is None or best_line_count < 4:
             continue
 
-        # Extract numbers from the best data line + one line after
         data_nums = []
         for si in range(best_line_idx, min(len(lines), best_line_idx + 2)):
             for n in number_pattern.findall(lines[si]):
@@ -270,15 +235,6 @@ def parse_pdf(file_bytes):
                 except:
                     pass
 
-        # Fidelity column order:
-        # [0] Beginning Market Value
-        # [1] Quantity
-        # [2] Price Per Unit
-        # [3] Ending Market Value  <-- WANT
-        # [4] Cost Basis           <-- WANT
-        # [5] Gain/Loss
-        # [6] EAI (sometimes)
-
         if len(data_nums) >= 5:
             beginning = data_nums[0]
             quantity = data_nums[1]
@@ -286,16 +242,9 @@ def parse_pdf(file_bytes):
             ending_value = data_nums[3]
             cost_basis = data_nums[4]
 
-            # Sanity checks
-            # Ending value should be roughly quantity * price
             expected = quantity * price
-            # Allow 20% tolerance (due to rounding in PDF)
             if expected > 0 and abs(ending_value - expected) / expected > 0.5:
-                # Numbers might be shifted, try alternate positions
-                # Sometimes the beginning value is missing the $ sign
-                # and gets merged differently
                 if len(data_nums) >= 6:
-                    # Try shifting by 1
                     alt_ending = data_nums[4]
                     alt_cost = data_nums[5]
                     alt_expected = data_nums[2] * data_nums[3]
@@ -303,19 +252,13 @@ def parse_pdf(file_bytes):
                         ending_value = alt_ending
                         cost_basis = alt_cost
 
-            # Skip if values are unreasonably small (likely parsed wrong)
             if ending_value < 0.50:
                 continue
-
-            # Handle "not applicable" cost basis (cash funds)
-            # Those won't have valid cost, use ending value
             if cost_basis <= 0:
                 cost_basis = ending_value
 
             info = lookup_ticker(ticker)
             if info.get('valid'):
-                # If ticker already exists (from another account),
-                # add the values together
                 if ticker in holdings:
                     holdings[ticker]['value'] = round(
                         holdings[ticker]['value'] + ending_value, 2
@@ -332,13 +275,83 @@ def parse_pdf(file_bytes):
                         'sector': info.get('sector', 'Other'),
                     }
 
-    # ── Step 3: Handle cash positions with "not applicable" ──────────────
+    # Mark cash positions
     cash_tickers = {'SPAXX', 'FDRXX', 'SWVXX', 'VMFXX', 'FCASH', 'SPRXX'}
     for ticker in list(holdings.keys()):
         if ticker in cash_tickers:
             holdings[ticker]['type'] = 'Cash'
             holdings[ticker]['sector'] = 'Cash'
             holdings[ticker]['cost'] = holdings[ticker]['value']
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  STRATEGY 2: Generic fallback — standalone tickers near dollar amounts
+    #  Works for Schwab, Vanguard, E*Trade, Merrill, etc.
+    # ══════════════════════════════════════════════════════════════════════
+
+    if len(holdings) < 3:
+        # Strategy 1 didn't find much — try generic approach
+        candidates = {}
+
+        # Scan tables first
+        for table in all_tables:
+            for row in table:
+                if not row:
+                    continue
+                row_str = [str(cell).strip() if cell else '' for cell in row]
+                for cell in row_str:
+                    for word in cell.split():
+                        w = word.upper().strip('.,;:()').replace('.', '-')
+                        if is_likely_ticker(w) and w not in holdings:
+                            money = [parse_money(c) for c in row_str]
+                            money = [v for v in money if v is not None and abs(v) > 0.5]
+                            if money:
+                                if w not in candidates:
+                                    candidates[w] = []
+                                candidates[w].append(money)
+
+        # Scan text lines
+        for i, line in enumerate(lines):
+            for word in line.split():
+                w = word.upper().strip('.,;:()').replace('.', '-')
+                if is_likely_ticker(w) and w not in candidates and w not in holdings:
+                    context = ' '.join(lines[max(0, i):min(len(lines), i + 3)])
+                    amounts = re.findall(r'\$?\s*([\d,]+\.\d{2})', context)
+                    money = [parse_money(a) for a in amounts]
+                    money = [v for v in money if v and abs(v) > 0.5]
+                    if money:
+                        candidates[w] = [money]
+
+        # Validate via Yahoo
+        progress_bar = st.progress(0, text="Validating tickers...")
+        total = len(candidates)
+        for idx, (ticker, money_lists) in enumerate(candidates.items()):
+            progress_bar.progress(
+                (idx + 1) / max(total, 1),
+                text=f"Validating {ticker}...",
+            )
+            info = lookup_ticker(ticker)
+            if not info['valid']:
+                continue
+
+            all_money = []
+            for ml in money_lists:
+                all_money.extend(ml)
+            positives = sorted([v for v in all_money if v > 0], reverse=True)
+            if not positives:
+                continue
+
+            value = positives[0]
+            cost = positives[1] if len(positives) >= 2 and positives[1] > 1 else value
+
+            holdings[ticker] = {
+                'value': round(value, 2),
+                'cost': round(cost, 2),
+                'type': info['type'],
+                'name': info['name'],
+                'sector': info.get('sector', 'Other'),
+            }
+
+        progress_bar.empty()
 
     return holdings, full_text, all_tables
     
