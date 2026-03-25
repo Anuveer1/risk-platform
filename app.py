@@ -51,42 +51,107 @@ def lookup_ticker(ticker):
         st.session_state.ticker_cache[ticker] = result
         return result
 
-    try:
-        info = yf.Ticker(ticker).info
-        if not info or info.get('regularMarketPrice') is None:
-            st.session_state.ticker_cache[ticker] = {'valid': False}
-            return {'valid': False}
+    # Hard-coded sector/type map for common tickers (avoids slow API calls)
+    known_tickers = {
+        'AAPL': ('Apple Inc', 'Technology', 'Stock'),
+        'GOOGL': ('Alphabet Inc', 'Technology', 'Stock'),
+        'GOOG': ('Alphabet Inc', 'Technology', 'Stock'),
+        'AMZN': ('Amazon.com Inc', 'Technology', 'Stock'),
+        'MSFT': ('Microsoft Corp', 'Technology', 'Stock'),
+        'META': ('Meta Platforms Inc', 'Technology', 'Stock'),
+        'NVDA': ('NVIDIA Corp', 'Technology', 'Stock'),
+        'TSLA': ('Tesla Inc', 'Consumer', 'Stock'),
+        'COST': ('Costco Wholesale', 'Consumer', 'Stock'),
+        'DIS': ('Walt Disney Co', 'Technology', 'Stock'),
+        'LLY': ('Eli Lilly & Co', 'Healthcare', 'Stock'),
+        'PFE': ('Pfizer Inc', 'Healthcare', 'Stock'),
+        'REGN': ('Regeneron Pharmaceuticals', 'Healthcare', 'Stock'),
+        'TMO': ('Thermo Fisher Scientific', 'Healthcare', 'Stock'),
+        'PLTR': ('Palantir Technologies', 'Technology', 'Stock'),
+        'ACHR': ('Archer Aviation', 'Industrials', 'Stock'),
+        'LULU': ('Lululemon Athletica', 'Consumer', 'Stock'),
+        'MELI': ('MercadoLibre Inc', 'Technology', 'Stock'),
+        'BRKB': ('Berkshire Hathaway B', 'Financials', 'Stock'),
+        'BRK-B': ('Berkshire Hathaway B', 'Financials', 'Stock'),
+        'JPM': ('JPMorgan Chase', 'Financials', 'Stock'),
+        'V': ('Visa Inc', 'Financials', 'Stock'),
+        'MA': ('Mastercard Inc', 'Financials', 'Stock'),
+        'JNJ': ('Johnson & Johnson', 'Healthcare', 'Stock'),
+        'UNH': ('UnitedHealth Group', 'Healthcare', 'Stock'),
+        'HD': ('Home Depot', 'Consumer', 'Stock'),
+        'PG': ('Procter & Gamble', 'Consumer', 'Stock'),
+        'KO': ('Coca-Cola Co', 'Consumer', 'Stock'),
+        'PEP': ('PepsiCo Inc', 'Consumer', 'Stock'),
+        'ABBV': ('AbbVie Inc', 'Healthcare', 'Stock'),
+        'MRK': ('Merck & Co', 'Healthcare', 'Stock'),
+        'WMT': ('Walmart Inc', 'Consumer', 'Stock'),
+        'BAC': ('Bank of America', 'Financials', 'Stock'),
+        'CRM': ('Salesforce Inc', 'Technology', 'Stock'),
+        'NFLX': ('Netflix Inc', 'Technology', 'Stock'),
+        'AMD': ('Advanced Micro Devices', 'Technology', 'Stock'),
+        'INTC': ('Intel Corp', 'Technology', 'Stock'),
+        'CSCO': ('Cisco Systems', 'Technology', 'Stock'),
+        'ADBE': ('Adobe Inc', 'Technology', 'Stock'),
+        'ORCL': ('Oracle Corp', 'Technology', 'Stock'),
+        'T': ('AT&T Inc', 'Technology', 'Stock'),
+        'VZ': ('Verizon Communications', 'Technology', 'Stock'),
+        'XOM': ('Exxon Mobil', 'Energy', 'Stock'),
+        'CVX': ('Chevron Corp', 'Energy', 'Stock'),
+        'AVGO': ('Broadcom Inc', 'Technology', 'Stock'),
+        'NOW': ('ServiceNow Inc', 'Technology', 'Stock'),
+        'UBER': ('Uber Technologies', 'Technology', 'Stock'),
+        'SQ': ('Block Inc', 'Technology', 'Stock'),
+        'SHOP': ('Shopify Inc', 'Technology', 'Stock'),
+        'PYPL': ('PayPal Holdings', 'Technology', 'Stock'),
+        'COIN': ('Coinbase Global', 'Financials', 'Stock'),
+        'SNOW': ('Snowflake Inc', 'Technology', 'Stock'),
+        'NET': ('Cloudflare Inc', 'Technology', 'Stock'),
+        'ABNB': ('Airbnb Inc', 'Consumer', 'Stock'),
+        'RIVN': ('Rivian Automotive', 'Consumer', 'Stock'),
+        'LCID': ('Lucid Group', 'Consumer', 'Stock'),
+        'SOFI': ('SoFi Technologies', 'Financials', 'Stock'),
+        'NKE': ('Nike Inc', 'Consumer', 'Stock'),
+        'SBUX': ('Starbucks Corp', 'Consumer', 'Stock'),
+        # ETFs
+        'SPY': ('SPDR S&P 500 ETF', 'Broad Market', 'ETF'),
+        'QQQ': ('Invesco QQQ Trust', 'Technology', 'ETF'),
+        'IWM': ('iShares Russell 2000', 'Broad Market', 'ETF'),
+        'DIA': ('SPDR Dow Jones ETF', 'Broad Market', 'ETF'),
+        'VOO': ('Vanguard S&P 500 ETF', 'Broad Market', 'ETF'),
+        'VTI': ('Vanguard Total Stock Market', 'Broad Market', 'ETF'),
+        'VGT': ('Vanguard Info Tech ETF', 'Technology', 'ETF'),
+        'XLK': ('Technology Select Sector SPDR', 'Technology', 'ETF'),
+        'XLV': ('Health Care Select Sector SPDR', 'Healthcare', 'ETF'),
+        'XLE': ('Energy Select Sector SPDR', 'Energy', 'ETF'),
+        'XLF': ('Financial Select Sector SPDR', 'Financials', 'ETF'),
+        'XLI': ('Industrial Select Sector SPDR', 'Industrials', 'ETF'),
+        'XLY': ('Consumer Discretionary SPDR', 'Consumer', 'ETF'),
+        'XLP': ('Consumer Staples SPDR', 'Consumer', 'ETF'),
+        'XLU': ('Utilities Select Sector SPDR', 'Utilities', 'ETF'),
+        'XLB': ('Materials Select Sector SPDR', 'Industrials', 'ETF'),
+        'XLRE': ('Real Estate Select SPDR', 'Real Estate', 'ETF'),
+        'XLC': ('Communication Services SPDR', 'Technology', 'ETF'),
+        'ARKK': ('ARK Innovation ETF', 'Technology', 'ETF'),
+        'SOXX': ('iShares Semiconductor ETF', 'Technology', 'ETF'),
+        'IXN': ('iShares Global Tech ETF', 'Technology', 'ETF'),
+        'IDRV': ('iShares Self-Driving EV ETF', 'Technology', 'ETF'),
+        'SCHD': ('Schwab US Dividend Equity', 'Broad Market', 'ETF'),
+        'VYM': ('Vanguard High Dividend Yield', 'Broad Market', 'ETF'),
+        'JEPI': ('JPMorgan Equity Premium Income', 'Broad Market', 'ETF'),
+        'GLD': ('SPDR Gold Trust', 'Other', 'ETF'),
+        'SLV': ('iShares Silver Trust', 'Other', 'ETF'),
+        'TLT': ('iShares 20+ Year Treasury', 'Other', 'ETF'),
+        'BND': ('Vanguard Total Bond Market', 'Other', 'ETF'),
+        'AGG': ('iShares Core US Aggregate Bond', 'Other', 'ETF'),
+        'VNQ': ('Vanguard Real Estate ETF', 'Real Estate', 'ETF'),
+        'FBTC': ('Fidelity Wise Origin Bitcoin', 'Crypto', 'ETF'),
+        'IBIT': ('iShares Bitcoin Trust', 'Crypto', 'ETF'),
+        'GBTC': ('Grayscale Bitcoin Trust', 'Crypto', 'ETF'),
+        'ETHE': ('Grayscale Ethereum Trust', 'Crypto', 'ETF'),
+    }
 
-        name = info.get('shortName', info.get('longName', ticker))
-        sector = info.get('sector', 'Other')
-        qtype = info.get('quoteType', '').upper()
-
-        if qtype == 'ETF':
-            asset_type = 'ETF'
-        elif qtype == 'MUTUALFUND':
-            asset_type = 'Fund'
-        elif qtype == 'CRYPTOCURRENCY':
-            asset_type = 'Crypto'
-        else:
-            asset_type = 'Stock'
-
-        sector_map = {
-            'Technology': 'Technology',
-            'Communication Services': 'Technology',
-            'Consumer Cyclical': 'Consumer',
-            'Consumer Defensive': 'Consumer',
-            'Healthcare': 'Healthcare',
-            'Health Care': 'Healthcare',
-            'Financial Services': 'Financials',
-            'Financials': 'Financials',
-            'Energy': 'Energy',
-            'Industrials': 'Industrials',
-            'Basic Materials': 'Industrials',
-            'Real Estate': 'Real Estate',
-            'Utilities': 'Utilities',
-        }
-        sector = sector_map.get(sector, sector)
-
+    if ticker in known_tickers:
+        name, sector, asset_type = known_tickers[ticker]
         result = {
             'valid': True,
             'name': name,
@@ -96,9 +161,62 @@ def lookup_ticker(ticker):
         st.session_state.ticker_cache[ticker] = result
         return result
 
+    # Fallback: validate via price history (faster than .info)
+    try:
+        test = yf.download(ticker, period='5d', progress=False)
+        if test.empty or len(test) < 1:
+            st.session_state.ticker_cache[ticker] = {'valid': False}
+            return {'valid': False}
+
+        # Valid ticker but not in our known list — use generic info
+        result = {
+            'valid': True,
+            'name': ticker,
+            'sector': 'Other',
+            'type': 'Stock',
+        }
+
+        # Try to get name/sector from .info but don't fail if it times out
+        try:
+            info = yf.Ticker(ticker).info
+            if info:
+                result['name'] = info.get('shortName', info.get('longName', ticker))
+                sector = info.get('sector', 'Other')
+                qtype = info.get('quoteType', '').upper()
+
+                sector_map = {
+                    'Technology': 'Technology',
+                    'Communication Services': 'Technology',
+                    'Consumer Cyclical': 'Consumer',
+                    'Consumer Defensive': 'Consumer',
+                    'Healthcare': 'Healthcare',
+                    'Health Care': 'Healthcare',
+                    'Financial Services': 'Financials',
+                    'Financials': 'Financials',
+                    'Energy': 'Energy',
+                    'Industrials': 'Industrials',
+                    'Basic Materials': 'Industrials',
+                    'Real Estate': 'Real Estate',
+                    'Utilities': 'Utilities',
+                }
+                result['sector'] = sector_map.get(sector, sector)
+
+                if qtype == 'ETF':
+                    result['type'] = 'ETF'
+                elif qtype == 'MUTUALFUND':
+                    result['type'] = 'Fund'
+                elif qtype == 'CRYPTOCURRENCY':
+                    result['type'] = 'Crypto'
+        except Exception:
+            pass  # Keep generic info, at least we know the ticker is valid
+
+        st.session_state.ticker_cache[ticker] = result
+        return result
+
     except Exception:
         st.session_state.ticker_cache[ticker] = {'valid': False}
         return {'valid': False}
+        
 
 
 def parse_money(text):
