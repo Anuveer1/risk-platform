@@ -601,6 +601,7 @@ def calculate_metrics(holdings, close, valid_tickers, total_value):
 
     rf_daily = 0.045 / 252
     m = {}
+    
 
     # Annualized return and volatility
     m['port_ret_ann'] = aligned['Portfolio'].mean() * 252 * 100
