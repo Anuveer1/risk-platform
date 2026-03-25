@@ -695,12 +695,25 @@ def render_risk_reward_scatter(holdings):
     """Render a Risk vs Reward scatter plot comparing portfolio against major indices."""
     st.markdown("---")
     st.subheader("📊 Risk vs. Reward Analysis")
-    st.caption("Compares your portfolio's risk-adjusted performance against major benchmarks (1-year data)")
+    st.caption("Compares your portfolio's risk-adjusted performance against major benchmarks")
 
     total_value = sum(h['value'] for h in holdings.values())
     if total_value <= 0:
         st.warning("No holdings to analyze.")
         return
+
+    # ── Time period selector ─────────────────────────────────────────────
+    period_col1, period_col2 = st.columns([1, 3])
+    with period_col1:
+        period_choice = st.selectbox(
+            "Time Period",
+            ["1 Year", "3 Years", "5 Years"],
+            index=0,
+            key="risk_reward_period",
+        )
+
+    period_days = {"1 Year": 365, "3 Years": 365 * 3, "5 Years": 365 * 5}
+    selected_days = period_days[period_choice]
 
     weights = {}
     for ticker, info in holdings.items():
@@ -724,7 +737,7 @@ def render_risk_reward_scatter(holdings):
     }
 
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
+    start_date = end_date - timedelta(days=selected_days)
 
     @st.cache_data(ttl=3600, show_spinner=False)
     def get_scatter_returns(tickers_list, start, end):
@@ -764,7 +777,7 @@ def render_risk_reward_scatter(holdings):
     benchmark_tickers = list(benchmarks.keys())
     all_tickers = list(set(portfolio_tickers + benchmark_tickers))
 
-    with st.spinner("Downloading market data for risk analysis..."):
+    with st.spinner(f"Downloading {period_choice.lower()} market data for risk analysis..."):
         returns_df = get_scatter_returns(all_tickers, start_date, end_date)
 
     if returns_df.empty:
@@ -949,7 +962,7 @@ def render_risk_reward_scatter(holdings):
             )
 
     fig.update_layout(
-        title="Risk vs. Reward: Your Portfolio vs. Major Benchmarks",
+        title=f"Risk vs. Reward: Your Portfolio vs. Major Benchmarks ({period_choice})",
         xaxis_title="Annualized Volatility (Risk) %",
         yaxis_title="Annualized Return %",
         height=600,
@@ -994,12 +1007,11 @@ def render_risk_reward_scatter(holdings):
         else:
             verdict = "🔴 **Underperforming** — Lower returns with higher risk than the S&P 500. Consider rebalancing."
 
-        st.markdown(f"**Portfolio Assessment:** {verdict}")
+        st.markdown(f"**Portfolio Assessment ({period_choice}):** {verdict}")
         st.markdown(
             f"Your Sharpe Ratio ({p_sharpe:.2f}) vs S&P 500 ({sp_sharpe:.2f}) — "
             f"{'higher is better, and yours is ahead!' if p_sharpe > sp_sharpe else 'the S&P 500 currently has better risk-adjusted returns.'}"
         )
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR — DATA INPUT
 # ══════════════════════════════════════════════════════════════════════════════
