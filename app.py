@@ -476,19 +476,25 @@ def parse_pdf(file_bytes):
 
 @st.cache_data(ttl=300, show_spinner="Downloading price data...")
 def download_prices(tickers_tuple, period='1y'):
-    """Download price data with caching (refreshes every 5 min)."""
+    """Download price data with caching."""
     tickers = list(tickers_tuple)
     if 'SPY' not in tickers:
         tickers.append('SPY')
 
-    prices = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+    # Remove cash-like tickers that Yahoo can't price
+    skip = {'SPAXX', 'FDRXX', 'SWVXX', 'VMFXX', 'FCASH', 'SPRXX', 'TTTXX'}
+    tickers = [t for t in tickers if t not in skip]
+
+    if not tickers:
+        return pd.DataFrame()
+
+    # Download in one batch
+    prices = yf.download(tickers, period=period, auto_adjust=True, progress=False, threads=True)
 
     if prices.empty:
         return pd.DataFrame()
 
-    # Handle MultiIndex columns (yf.download returns this for multiple tickers)
     if isinstance(prices.columns, pd.MultiIndex):
-        # Get just the Close prices
         if 'Close' in prices.columns.get_level_values(0):
             close = prices['Close']
         else:
@@ -496,9 +502,7 @@ def download_prices(tickers_tuple, period='1y'):
     else:
         close = prices
 
-    # Flatten column names to plain strings
     close.columns = [str(c).strip() for c in close.columns]
-
     return close.dropna(how='all').ffill()
 
 
