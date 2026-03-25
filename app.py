@@ -480,11 +480,25 @@ def download_prices(tickers_tuple, period='1y'):
     tickers = list(tickers_tuple)
     if 'SPY' not in tickers:
         tickers.append('SPY')
+
     prices = yf.download(tickers, period=period, auto_adjust=True, progress=False)
+
+    if prices.empty:
+        return pd.DataFrame()
+
+    # Handle MultiIndex columns (yf.download returns this for multiple tickers)
     if isinstance(prices.columns, pd.MultiIndex):
-        close = prices['Close']
+        # Get just the Close prices
+        if 'Close' in prices.columns.get_level_values(0):
+            close = prices['Close']
+        else:
+            close = prices.droplevel(0, axis=1)
     else:
         close = prices
+
+    # Flatten column names to plain strings
+    close.columns = [str(c).strip() for c in close.columns]
+
     return close.dropna(how='all').ffill()
 
 
@@ -492,9 +506,16 @@ def download_prices(tickers_tuple, period='1y'):
 def download_spy_alltime():
     """Download full SPY history."""
     spy = yf.download('SPY', period='max', auto_adjust=True, progress=False)
+
     if isinstance(spy.columns, pd.MultiIndex):
-        return spy['Close']['SPY']
-    return spy['Close']
+        spy = spy.droplevel(0, axis=1) if spy.columns.nlevels > 1 else spy
+
+    if 'SPY' in spy.columns:
+        return spy['SPY']
+    elif 'Close' in spy.columns:
+        return spy['Close']
+    else:
+        return spy.iloc[:, 0]
 
 
 def calculate_metrics(holdings, close, valid_tickers, total_value):
@@ -762,17 +783,52 @@ elif st.session_state.dashboards_ready:
         if h.get('type') not in ('Cash',)
     ]
 
+    # Fix known ticker symbol mismatches
+    ticker_remap = {
+        'BRKB': 'BRK-B',
+        'BRK.B': 'BRK-B',
+    }
+
+    # Remap holdings keys if needed
+    for old_key, new_key in ticker_remap.items():
+        if old_key in holdings and new_key not in holdings:
+            holdings[new_key] = holdings.pop(old_key)
+
+    stock_tickers = [
+        t for t, h in holdings.items()
+        if h.get('type') not in ('Cash',)
+    ]
+
     close = download_prices(tuple(sorted(stock_tickers)))
     spy_alltime_close = download_spy_alltime()
+
+    # Handle MultiIndex columns from yf.download
+    if isinstance(close.columns, pd.MultiIndex):
+        close = close.droplevel(0, axis=1) if close.columns.nlevels > 1 else close
+
+    # Flatten column names
+    close.columns = [str(c).strip() for c in close.columns]
 
     valid_tickers = [
         t for t in stock_tickers
         if t in close.columns and close[t].notna().sum() > 20
     ]
 
+    # Debug info if things go wrong
     if not valid_tickers:
-        st.error("No valid price data found for any tickers. Please check your holdings.")
+        st.error("No valid price data found.")
+        with st.expander("🔍 Debug Info"):
+            st.write("**Stock tickers sent to Yahoo:**", stock_tickers)
+            st.write("**Columns returned:**", list(close.columns))
+            st.write("**DataFrame shape:**", close.shape)
+            st.write("**First few rows:**")
+            st.dataframe(close.head())
         st.stop()
+
+    # Show how many tickers matched
+    missing = [t for t in stock_tickers if t not in valid_tickers]
+    if missing:
+        st.warning(f"Could not get price data for: {', '.join(missing)}")
 
     # ── Calculate metrics ────────────────────────────────────────────────────
     m = calculate_metrics(holdings, close, valid_tickers, total_value)
