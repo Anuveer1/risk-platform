@@ -1,0 +1,6 @@
+streamlit
+plotly>=6.1.1
+yfinance
+pdfplumber
+pandas
+numpy
