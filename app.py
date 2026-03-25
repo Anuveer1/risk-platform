@@ -317,157 +317,175 @@ def parse_pdf(file_bytes):
 
     lines = full_text.split('\n')
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  STRATEGY: Find ticker symbols in parentheses, then scan that line
-    #  and nearby lines for the number sequence:
-    #    beg_value, quantity, price, ending_value, cost_basis, gain/loss
-    #
-    #  Fidelity puts multi-line descriptions, so the ticker "(XLE)" might
-    #  appear on line N while the numbers are on line N, N+1, or N+2.
-    #  We also handle the case where numbers are on the SAME line as the
-    #  ticker.
-    # ══════════════════════════════════════════════════════════════════════
-
     paren_pattern = re.compile(r'\(([A-Z][A-Z0-9]{1,5})\)')
     number_pattern = re.compile(r'-?\$?[\d,]+\.\d{2,4}')
+    percent_pattern = re.compile(r'-?\$?[\d,]+\.\d{2,4}%')
 
-    # Collect every (TICKER) occurrence with its line index
+    # Non-ticker abbreviations to skip
+    SKIP_PARENS = {
+        'ETFS', 'ETNS', 'NYSE', 'SIPC', 'SIPA', 'CUSIP', 'FIFO', 'FDIC',
+        'USD', 'IAD', 'DTC', 'FBS', 'NFS', 'FDC', 'HSA', 'IRA', 'LLC',
+        'ROTH', 'FMTC', 'AI', 'FMR', 'SIPC', 'ETF', 'CD', 'CDS', 'CUSC',
+        'CUSCS', 'MLPs', 'MLP', 'REITs', 'REIT', 'UITs', 'UIT', 'LPs',
+    }
+
+    # ── Pass 1: Find all ticker occurrences with line indices ──
     ticker_occurrences = []
     for i, line in enumerate(lines):
-        # Skip header/total/summary lines
         low = line.strip().lower()
+        # Skip obvious non-holding lines
         if low.startswith('total '):
-            continue
-        if 'beginning' in low and 'ending' in low:
-            continue
-        if 'market value' in low and 'quantity' in low:
-            continue
-        if 'account' in low and ('holdings' in low or 'summary' in low):
             continue
         if 'top holdings' in low:
             continue
         if 'income summary' in low:
             continue
-        if 'percent of' in low:
+        if 'estimated cash flow' in low:
+            continue
+        if 'activity' in low and 'core' not in low:
+            continue
+        if 'settlement' in low:
+            continue
+        if 'dividend received' in low:
+            continue
+        if 'you bought' in low:
+            continue
+        if 'copyright' in low or 'moody' in low:
             continue
 
         for match in paren_pattern.finditer(line):
             ticker = match.group(1)
+            if ticker in SKIP_PARENS:
+                continue
             if ticker in FALSE_POSITIVES:
                 continue
-            if len(ticker) < 2 or len(ticker) > 5:
-                continue
-            # Skip things like "(continued)" or "(ETFs)"
-            if ticker in {'ETFS', 'ETNS', 'NYSE', 'SIPC', 'SIPA', 'CUSIP',
-                          'FIFO', 'FDIC', 'USD', 'IAD', 'DTC', 'SIPC',
-                          'FBS', 'NFS', 'FDC', 'HSA', 'IRA', 'LLC',
-                          'ROTH', 'FMTC', 'AI'}:
+            if len(ticker) < 1 or len(ticker) > 5:
                 continue
             ticker_occurrences.append((i, ticker))
 
-    # For each ticker occurrence, gather numbers from that line and the
-    # next few lines (up to the next ticker or 5 lines, whichever comes first)
+    # ── Pass 2: For each ticker, look BACKWARDS for numbers ──
+    def extract_numbers_from_line(line_text):
+        """Extract dollar/number values, excluding percentages."""
+        nums = []
+        for m in number_pattern.finditer(line_text):
+            # Check if it's actually a percentage
+            end_pos = m.end()
+            if end_pos < len(line_text) and line_text[end_pos] == '%':
+                continue
+            n_str = m.group().replace('$', '').replace(',', '').strip()
+            try:
+                val = float(n_str)
+                nums.append(val)
+            except:
+                pass
+        return nums
+
     for idx, (line_idx, ticker) in enumerate(ticker_occurrences):
-        # Determine the end of this ticker's "number block"
-        if idx + 1 < len(ticker_occurrences):
-            next_ticker_line = ticker_occurrences[idx + 1][0]
-            block_end = min(next_ticker_line, line_idx + 6)
-        else:
-            block_end = min(len(lines), line_idx + 6)
-
-        # Collect all numbers from the ticker line through block_end
+        # Look at the ticker line and up to 4 lines BEFORE it for numbers
+        # Also check 1-2 lines AFTER (for cases where numbers are on same line)
         block_nums = []
-        for si in range(line_idx, block_end):
-            line_text = lines[si]
-            low = line_text.strip().lower()
-            # Stop at total lines
-            if low.startswith('total '):
-                break
-            for n_match in number_pattern.finditer(line_text):
-                n_str = n_match.group().replace('$', '').replace(',', '').strip()
-                # Skip percentages that appear after the number block
-                # (EAI/EY values like "3.820%")
-                n_end = n_match.end()
-                rest = line_text[n_end:n_end + 1]
-                if rest == '%':
-                    continue
-                try:
-                    val = float(n_str)
-                    block_nums.append(val)
-                except:
-                    pass
 
-        # We need at least 4 numbers: beg_value, quantity, price, ending_value
-        # Ideally 6: beg, qty, price, ending, cost, gain/loss
-        if len(block_nums) < 4:
+        # Search backwards first (up to 4 lines before ticker)
+        search_start = max(0, line_idx - 4)
+        search_end = min(len(lines), line_idx + 3)
+
+        # But don't go past another ticker's line
+        prev_ticker_line = -1
+        if idx > 0:
+            prev_ticker_line = ticker_occurrences[idx - 1][0]
+
+        # Also don't go past "Total" lines
+        candidate_lines = []
+        for si in range(search_start, search_end):
+            if si <= prev_ticker_line and si < line_idx:
+                continue
+            line_text = lines[si].strip()
+            low = line_text.lower()
+            if low.startswith('total '):
+                if si < line_idx:
+                    # Reset — don't use numbers from before a Total line
+                    candidate_lines = []
+                    continue
+                else:
+                    break
+            candidate_lines.append((si, line_text))
+
+        # Now find which candidate line has the main number block
+        # The "data line" typically has 5+ numbers on it
+        data_line_nums = []
+        for si, line_text in candidate_lines:
+            nums = extract_numbers_from_line(line_text)
+            if len(nums) >= 4:
+                # This is likely the main data line
+                data_line_nums = nums
+                break
+
+        # If we didn't find a line with 4+ numbers, gather all numbers
+        if not data_line_nums:
+            for si, line_text in candidate_lines:
+                data_line_nums.extend(extract_numbers_from_line(line_text))
+
+        block_nums = data_line_nums
+
+        if len(block_nums) < 3:
             continue
 
-        # Try to identify the correct columns by finding qty * price ≈ ending
+        # ── Identify columns: beg_value, quantity, price, ending_value, cost, gain_loss ──
         found = False
         best_ending = None
         best_cost = None
 
-        for start in range(min(3, len(block_nums) - 3)):
-            # Try: block_nums[start] = beg, [start+1] = qty, [start+2] = price,
-            #       [start+3] = ending, [start+4] = cost
-            qty = block_nums[start + 1]
-            price = block_nums[start + 2]
-            ending = block_nums[start + 3]
+        # Try qty * price ≈ ending for various starting offsets
+        for start in range(min(4, len(block_nums) - 2)):
+            for qi in range(start, min(len(block_nums) - 2, start + 3)):
+                qty = block_nums[qi]
+                price = block_nums[qi + 1]
+                expected = qty * price
 
-            expected = qty * price
-            if expected > 0.01 and abs(ending - expected) / max(expected, 0.01) < 0.02:
-                best_ending = ending
-                if start + 4 < len(block_nums):
-                    best_cost = block_nums[start + 4]
-                else:
-                    best_cost = best_ending
-                found = True
+                if expected < 0.01:
+                    continue
+
+                # Look for ending value that matches
+                for ei in range(qi + 2, min(len(block_nums), qi + 4)):
+                    ending = block_nums[ei]
+                    if abs(ending - expected) / max(expected, 0.01) < 0.015:
+                        best_ending = ending
+                        if ei + 1 < len(block_nums):
+                            best_cost = abs(block_nums[ei + 1])
+                        else:
+                            best_cost = best_ending
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
                 break
 
-        # Also try without a beginning value: qty at [0], price at [1], ending at [2]
         if not found:
-            for start in range(min(2, len(block_nums) - 2)):
-                qty = block_nums[start]
-                price = block_nums[start + 1]
-                ending = block_nums[start + 2]
-
-                expected = qty * price
-                if expected > 0.01 and abs(ending - expected) / max(expected, 0.01) < 0.02:
-                    best_ending = ending
-                    if start + 3 < len(block_nums):
-                        best_cost = block_nums[start + 3]
-                    else:
+            # Fallback: for money market (SPAXX, FDRXX), qty=value and price=1.0000
+            if len(block_nums) >= 3:
+                for qi in range(len(block_nums) - 2):
+                    qty = block_nums[qi]
+                    price = block_nums[qi + 1]
+                    if abs(price - 1.0) < 0.001 and qty > 1:
+                        best_ending = qty  # qty IS the value for $1.00 funds
                         best_cost = best_ending
-                    found = True
-                    break
+                        found = True
+                        break
 
         if not found:
-            # Last resort: just take the largest positive numbers
-            positives = sorted([v for v in block_nums if v > 0.5], reverse=True)
-            if len(positives) >= 2:
-                best_ending = positives[0]
-                best_cost = positives[1]
-            elif len(positives) == 1:
-                best_ending = positives[0]
-                best_cost = positives[0]
-            else:
-                continue
+            continue
 
         if best_ending is None or best_ending < 0.01:
             continue
 
-        # Handle "not applicable" cost basis (for money market funds)
         if best_cost is None or best_cost <= 0:
             best_cost = best_ending
 
-        # Normalize ticker: BRKB -> BRK-B for Yahoo Finance
-        yahoo_ticker = ticker.replace('.', '-')
-        # Don't remap here — we'll store the original and remap at download time
-
+        # ── Validate ticker and aggregate ──
         info = lookup_ticker(ticker)
         if info.get('valid'):
             if ticker in holdings:
-                # Aggregate across accounts
                 holdings[ticker]['value'] = round(
                     holdings[ticker]['value'] + best_ending, 2
                 )
@@ -492,7 +510,6 @@ def parse_pdf(file_bytes):
             holdings[ticker]['cost'] = holdings[ticker]['value']
 
     return holdings, full_text, all_tables
-    
 
 @st.cache_data(ttl=300, show_spinner="Downloading price data...")
 def download_prices(tickers_tuple, period='1y'):
