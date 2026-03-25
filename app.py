@@ -896,8 +896,44 @@ def render_risk_reward_scatter(holdings):
 
         x_range = scatter_df['Annualized Volatility (%)']
         y_range = scatter_df['Annualized Return (%)']
-        x_min, x_max = x_range.min() - 3, x_range.max() + 3
-        y_min, y_max = y_range.min() - 3, y_range.max() + 3
+        x_min = x_range.min() - 3
+        x_max = x_range.max() + 3
+        y_min = y_range.min() - 3
+        y_max = y_range.max() + 3
+
+        # ── Quadrant background shading ──────────────────────────────────
+        # Top-left: lower risk, higher return → light green
+        fig.add_shape(
+            type="rect",
+            x0=x_min, x1=sp_vol, y0=sp_ret, y1=y_max,
+            fillcolor="rgba(39, 174, 96, 0.08)",
+            line=dict(width=0),
+            layer="below",
+        )
+        # Top-right: higher risk, higher return → light yellow
+        fig.add_shape(
+            type="rect",
+            x0=sp_vol, x1=x_max, y0=sp_ret, y1=y_max,
+            fillcolor="rgba(241, 196, 15, 0.08)",
+            line=dict(width=0),
+            layer="below",
+        )
+        # Bottom-left: lower risk, lower return → light yellow
+        fig.add_shape(
+            type="rect",
+            x0=x_min, x1=sp_vol, y0=y_min, y1=sp_ret,
+            fillcolor="rgba(241, 196, 15, 0.08)",
+            line=dict(width=0),
+            layer="below",
+        )
+        # Bottom-right: higher risk, lower return → light red
+        fig.add_shape(
+            type="rect",
+            x0=sp_vol, x1=x_max, y0=y_min, y1=sp_ret,
+            fillcolor="rgba(192, 57, 43, 0.08)",
+            line=dict(width=0),
+            layer="below",
+        )
 
         quadrant_labels = [
             ((sp_vol + x_min) / 2, (sp_ret + y_max) / 2, "✅ Lower Risk\nHigher Return", "green"),
@@ -963,7 +999,6 @@ def render_risk_reward_scatter(holdings):
             f"Your Sharpe Ratio ({p_sharpe:.2f}) vs S&P 500 ({sp_sharpe:.2f}) — "
             f"{'higher is better, and yours is ahead!' if p_sharpe > sp_sharpe else 'the S&P 500 currently has better risk-adjusted returns.'}"
         )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR — DATA INPUT
