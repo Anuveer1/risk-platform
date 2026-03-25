@@ -406,8 +406,17 @@ with st.sidebar:
                 st.success(f"Found {len(holdings)} holdings!")
             else:
                 st.warning("Could not auto-parse holdings. Please enter manually.")
-                with st.expander("Show raw PDF text"):
-                    st.text(raw_text[:5000])
+
+            # ── DEBUG: Always show raw PDF content ───────────────
+            with st.expander("🔍 DEBUG: Raw PDF Text", expanded=True):
+                st.text(raw_text[:10000])
+
+            with st.expander("🔍 DEBUG: Raw PDF Tables"):
+                for i, table in enumerate(raw_tables):
+                    st.markdown(f"**Table {i+1}:**")
+                    for row in table[:10]:
+                        st.text(str(row))
+                    st.markdown("---")
 
     # ── Manual Entry ─────────────────────────────────────────────────────────
     if input_method == "✏️ Enter Manually":
